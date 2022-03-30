@@ -1,0 +1,331 @@
+---
+title: "Arm-Level Tau"
+author: "Suzanne Dufault"
+date: "2021-08-24"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE,
+                      fig.path = "../graphs/",
+                      fig.width = 7,
+                      fig.height = 5)
+
+
+library(sf)
+library(sp)
+library(raster)
+library(rgdal)
+library(tmap)
+library(geodist)
+
+library(tidyverse)
+library(kableExtra)
+library(knitr)
+library(ggpubr)
+library(permute)
+
+load("data/2020-12-08_work-ts-spat.RData")
+
+int_assignment <- work_ts_spat %>% 
+  dplyr::select(cluster, Intervention = intervention) %>% 
+  distinct() %>% 
+  mutate(New_Clustr = ifelse(cluster < 10, paste0("0", cluster), as.character(cluster)),
+         Intervention = ifelse(Intervention == 0, "Untreated", "Intervention")) %>% 
+  dplyr::select(-cluster)
+
+# Creating Spatial Points Dataframe
+CRTND_dengue_data_SPDF <- SpatialPointsDataFrame(coords = work_ts_spat[,c("longitude", "latitude")],
+                                                 data = work_ts_spat[, c("cluster", "intervention", "enrolment_date", "illness_onset", "dengue", "age", "sex", "serotype")],
+                                                 proj4string = CRS("+init=epsg:4326")) # sets the projection to WGS 1984 using lat/long. Optional but good to specify
+
+CRTND_VCD_data_SPDF <- subset(CRTND_dengue_data_SPDF, dengue == 1)
+
+Yogya_Adm_2 <- readOGR("shapefiles/", "RCT_Yogyakarta")
+
+Yogya_Adm_2$Intervention <- ifelse(Yogya_Adm_2$Release == "Y", "Intervention", "Untreated")
+Yogya_Adm_2 <- spTransform(Yogya_Adm_2, crs(CRTND_VCD_data_SPDF))
+```
+
+## Arm-Level Tau {.tabset .tabset-pills}
+
+### Yogya - New shape file 
+
+```{r}
+tm_1 <- tm_shape(Yogya_Adm_2) + 
+  tm_polygons(col = "Intervention",
+              palette = c("lightgray", "white")) +
+  tm_shape(subset(CRTND_VCD_data_SPDF)) + 
+  tm_dots() +
+  tm_layout(title = "VCDs")
+
+tm_2 <- tm_shape(Yogya_Adm_2) + 
+  tm_polygons(col = "Intervention",
+              palette = c("lightgray","white")) +
+  tm_shape(subset(CRTND_dengue_data_SPDF, dengue == 0)) + 
+  tm_dots(alpha = 0.4) +
+  tm_layout(title = "Test-negatives")
+
+tm_together <- tmap_arrange(tm_1, tm_2)
+tm_together
+```
+
+```{r eval = FALSE}
+# change eval = TRUE for this chunk if you would like to save the figures as a separate .png file
+tmap_save(tm_together,
+          filename = here("graphs", paste0(Sys.Date(), "_tmap-simplified-boundaries-vcds-tns.png")),
+          height = 6,
+          width = 8,
+          units = "in")
+```
+
+### Estimating arm-level tau {.tabset}
+
+#### General estimation procedure
+
+When the underlying population distribution is unknown, we estimate $\tau(d_1,d_2)$ using an odds ratio approach:
+
+\[\tau = \frac{\hat{\theta}(d_1,d_2)}{\hat{\theta}(0,\infty)}\]
+
+where
+
+\[\hat{\theta}(d_1,d_2) = \frac{\sum_i\sum_j\mathbb{I_1}(z_{ij} = 1, d_1 < d_{ij} < d_2)}{\sum_i\sum_j\mathbb{I_1}(z_{ij} = 0, d_1 < d_{ij} < d_2)} = \frac{\# \text{concordant pairs}}{\# \text{discordant pairs}}\]
+
+\[z_{ij} = \cases{1 & if individuals i and j are potentially transmission related (e.g. same VCD serotype occurring within a given time of each other) \\ 0 & if individuals i and j are not transmission related (e.g. not same serotype, test-negatives, or not occurring within given time)}\]
+
+Therefore, we are estimating the odds that a given pair enrolled within $(d_1,d_2)$ of each other are transmission-related VCDs versus the odds that any given pair in the study area are transmission-related. 
+
+**Pairs including test-negative individuals can never contribute to the numerator of $\theta$, only the denominator.**
+
+To estimate this, need 4 different quantities:
+
++ no. of transmission related VCD pairs with the same serotype in a space-time window ($a$)
++ no. of non-transmission related pairs in a space-time window ($b$)
++ no. of transmission related VCD pairs with the same serotype in a time window over entire study area ($c$)
++ no. of non-transmission related pairs in a time window ($d$)
+
+Then $\hat{\tau} = (a/b)/(c/d)$.
+
+Let: 
+
++ $\mathbb{A}$ be an $n\times n$ matrix of pairwise absolute differences in decimal enrollment time
++ $\mathbb{B}$ be an $n\times n$ matrix of pairwise distances in meters
++ $\mathbb{C}$ be an $n\times n$ matrix of pairwise serotype concordance ($z_{ij}$)
+
+For a given distance range ($r_{\text{lower}}, r_{\text{upper}}$) and time $t$, transform $\mathbb{A}, \mathbb{B}$ into binary matrices: $\mathbb{A} \leq t, r_{\text{lower}} <\mathbb{B} < r_{\text{upper}}$.
+
+Then, 
+
+\[a = \sum \mathbb{A}\times \mathbb{B} \times \mathbb{C} = \# \text{transmission related VCD pairs with same serotype in space-time window} \]
+\[b = \sum \mathbb{A} \times \mathbb{B} \times (1 - \mathbb{C})= \# \text{non-transmission pairs in space-time window}\]
+\[c = \sum \mathbb{A}\times \mathbb{C} = \# \text{transmission related VCD pairs with same serotype in a given time window across entire study area}\]
+\[d = \sum \mathbb{A} \times (1- \mathbb{C}) = \text{total } \# \text{non-transmission pairs across entire study area in a given time window} \]
+
+#### Arm-level application
+
+We will estimate $\tau$ separately in the intervention ($\tau_1$) and untreated ($\tau_0$) arms. We can then compare behaviors. We expect the $\tau_0$ to reflect previously observed trends in spatial and temporal dependence (e.g. evidence of clustering up to a few hundred meters). If *Wolbachia* disrupts focal transmission of dengue virus, we expect to see the disruption of spatial and temporal dependence in dengue cases reflected in $\tau_1$.
+
+#### Code walk-through
+
+There are two functions needed for the application of the $\tau$ estimator. These functions are stored in the `lib` folder. 
+
++ `permutation-function.R` - this is the only function you need to interact with. It takes the following inputs and, with the help of the `binary-matrix-function_odds`, returns $\tau$ and its components $a$, $b$, $c$, $d$, AND can perform permutations to help build a permutation-based null distribution for hypothesis testing.
+   + `df` - the dataframe where each row corresponds to an individual
+   + `r1` - lower distance bound ($d_1$), can be a vector
+   + `r2` - upper distance bound ($d_2$), can be a vector of the same length as $d_2$
+   + `t` - time interval ($t$)
+   + `permute` - a logical TRUE/FALSE. When set to `TRUE`, it permutes the location of participants to break the spatial-dependence structure. When set to `FALSE`, it performs estimation on the data frame with the observed spatial structure intact.  
++ `binary-matrix-function_odds.R` - this helper function takes the matrices for pairwise time ($A$), distance ($B$), and homology/transmission-relatedness ($C$) and returns an estimate of $tau$ and its components $a$, $b$, $c$, $d$. Its inputs are:  
+   + `r1` lower distance bound ($d_1$) 
+   + `r2` upper distance bound ($d_2$)
+   + `t` time interval ($t$)
+   + `A` pairwise time
+   + `B` pairwise distance
+   + `C` pairwise homology
+   
+```{r}
+# Calling in the two functions
+source("lib/permutation-function.R")
+source("lib/binary-matrix-function_odds.R")
+```
+
+Example:
+
+Let's look at arm-level $tau$ estimates when the time horizon for relatedness is set at 30 days and we consider distances of (0,100m), (100m, 200m), (200m, 300m).
+
+**First** we MUST remove individuals with no known dengue serotype.
+
+```{r}
+work_ts_spat_known <- work_ts_spat %>% 
+  filter(serotype != "unk_serotype")
+
+# Also set up separate intervention and untreated datasets
+work_ts_intervention <- work_ts_spat_known %>% 
+  filter(intervention == 1)
+
+work_ts_untreated <- work_ts_spat_known %>% 
+  filter(intervention == 0)
+```
+
+```{r}
+d1 <- c(0, 100, 200) # lower bounds distance
+d2 <- c(100, 200, 300) # upper bounds distance
+t <- 30 # time in days
+
+# Generate the observed estimates of tau for intervention data
+observed_intervention <- permutation_function(
+  df = work_ts_intervention,
+  r1 = d1,
+  r2 = d2,
+  t = t,
+  permute = FALSE
+)
+
+observed_intervention <- observed_intervention %>% 
+  mutate(intervention = "Intervention")
+
+# Generate the observed estimates of tau for untreated data
+observed_untreated <- permutation_function(
+  df = work_ts_untreated,
+  r1 = d1,
+  r2 = d2,
+  t = t,
+  permute = FALSE
+)
+
+observed_untreated <- observed_untreated %>% 
+  mutate(intervention = "Untreated")
+```
+
+```{r tau-figure}
+library(latex2exp) # to put pretty math text on the legends
+observed_intervention %>%
+  bind_rows(observed_untreated) %>% 
+  ggplot(aes(x = r_upper, y = tau, col = intervention)) +
+  geom_line() + 
+  geom_hline(yintercept = 1, 
+             lty = 2) + 
+  coord_cartesian(ylim = c(0,8)) + 
+  theme_minimal() + 
+  labs(x = TeX("Distance: $d_2"),
+       y = TeX("Odds Ratio: $\\tau"),
+       title = TeX("Estimated arm-level $\\tau")) +
+  theme(legend.title = element_blank())
+```
+
+These estimates themselves seem suggestive, but with no estimated uncertainty present, it's difficult to tell if they "matter". To generate a permutation-based null distribution to compare against, use the following code. **Note:** I am only using 10 permutations for the sake of demonstration. Without getting into more complicated code, this takes a while to run. For actual analysis, it's better to use at least 1000.
+
+```{r}
+perms <- as.vector(1:10, mode = "list")
+
+library(furrr) # to run in parallel on your computer (saves time)
+null_intervention <- future_map_dfr(perms, ~permutation_function(df = work_ts_intervention,
+                                                                 r1 = d1,
+                                                                 r2 = d2,
+                                                                 t = t,
+                                                                 permute = TRUE),
+                                     .id = "permutation")
+null_intervention <- null_intervention %>% 
+  mutate(intervention = "Intervention")
+
+null_untreated <- future_map_dfr(perms, ~permutation_function(df = work_ts_untreated,
+                                                                 r1 = d1,
+                                                                 r2 = d2,
+                                                                 t = t,
+                                                                 permute = TRUE),
+                                     .id = "permutation")
+
+null_untreated <- null_untreated %>% 
+  mutate(intervention = "Untreated")
+```
+
+Let's take a look at the results for the intervention arm (you can also look at the results for the untreated arm, and the implication is the same):
+
+```{r}
+null_intervention %>% 
+  kable(digits = 3) %>% 
+  kable_styling()
+```
+
+The first three rows show the results for the $t$, $d_1$, and $d_2$ parameters for one permutation (reshuffling) of the participant location data. The next three rows show results for another permutation of the participant location data. Overall, we would expect that the distribution of $\tau$ from these permuted datasets tends to hover around the null value of $\tau = 1$. Let's look:
+
+```{r}
+null_intervention %>% 
+  mutate(permutation = factor(permutation, levels = 1:10)) %>% # for plotting purposes
+  ggplot(aes(x = r_upper, y = tau, col = permutation)) + 
+  geom_point(position = position_jitter(width = 10, height = 0)) + 
+  geom_hline(yintercept = 1,
+             lty = 2) +
+  coord_cartesian(ylim = c(0,8)) + 
+  theme_minimal() + 
+  labs(x = TeX("Distance: $d_2"),
+       y = TeX("Odds Ratio: $\\tau"),
+       title = TeX("Estimated arm-level $\\tau")) +
+  theme(legend.title = element_blank())
+```
+
+To examine whether our observed estimates of $\tau$ are unlikely to arise by random chance, we can compare our observed estimates of $\tau$ against the 95% confidence intervals on the null distribution. **Note: our 10 permutations are not enough to say anything substantial. This is just for demonstration. Use more permutations in your actual work.**
+
+Let's estimate the 95% CIs by taking the values of $\tau$ at the 2.5 and 97.5 percentiles.
+
+```{r}
+bounds_intervention <- null_intervention %>% 
+  # generate quantile-based estimates of CI for each distance interval 
+  group_by(r_lower, r_upper) %>% 
+  summarise(CI.l = quantile(tau, probs = 0.025),
+            CI.u = quantile(tau, probs = 0.975))
+
+bounds_untreated <- null_untreated %>% 
+  # generate quantile-based estimates of CI for each distance interval 
+  group_by(r_lower, r_upper) %>% 
+  summarise(CI.l = quantile(tau, probs = 0.025),
+            CI.u = quantile(tau, probs = 0.975))
+```
+
+```{r}
+p1 <- observed_intervention %>% 
+  full_join(bounds_intervention) %>% 
+  ggplot(aes(x = r_upper, y = tau)) + 
+  geom_line() +
+  geom_ribbon(aes(ymin = CI.l,
+                  ymax = CI.u),
+              col = "lightgray",
+              alpha = 0.3) +
+  geom_hline(yintercept = 1,
+             lty = 2) +
+  coord_cartesian(ylim = c(0,6)) + 
+  theme_minimal() + 
+  labs(x = TeX("Distance: $d_2"),
+       y = TeX("Odds Ratio: $\\tau"),
+       title = TeX("Estimated $\\tau"),
+       subtitle = "Intervention arm") +
+  theme(legend.title = element_blank())
+
+p2 <- observed_untreated %>% 
+  full_join(bounds_untreated) %>% 
+  ggplot(aes(x = r_upper, y = tau)) + 
+  geom_line() +
+  geom_ribbon(aes(ymin = CI.l,
+                  ymax = CI.u),
+              col = "lightgray",
+              alpha = 0.3) +
+  geom_hline(yintercept = 1,
+             lty = 2) +
+  coord_cartesian(ylim = c(0,6)) + 
+  theme_minimal() + 
+  labs(x = TeX("Distance: $d_2"),
+       y = TeX("Odds Ratio: $\\tau"),
+       title = TeX("Estimated $\\tau"),
+       subtitle = "Untreated arm") +
+  theme(legend.title = element_blank())
+
+ggarrange(p1, p2)
+```
+
+For the intervention arm: we fail to reject the null hypothesis that there is no spatial dependence in the transmission of dengue virus. The observed values of $\tau$ fall within the 95% confidence intervals of the permutation-based null distribution.
+
+For the untreated arm: there **is** evidence to reject the null hypothesis. The observed values of $\tau$ are outside of the 95% confidence interval of the permutation-based null distribution. Observing these values of $\tau$ would be very unlikely if the assumption that there is no spatial dependence in the transmission of dengue virus is true.

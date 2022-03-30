@@ -1,0 +1,166 @@
+---
+title: "Example Report"
+author: "Suzanne Dufault, PhD"
+date: "2021-06-30"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE)
+
+# Packages I like to use
+# install.packages("tidyverse") # Uncomment this line if you need to install the tidyverse package
+library(tidyverse) # Good for general data wrangling. More info: https://www.tidyverse.org
+
+# install.packages(c("knitr", "kableExtra")) 
+library(knitr)
+library(kableExtra) # For making prettier tables. More info: https://cran.r-project.org/web/packages/kableExtra/vignettes/awesome_table_in_html.html
+```
+
+## R Markdown
+
+This is an R Markdown file. The benefits of working out of a document like this is that you can easily write in normal text *and* run code. It's a good place to keep track of the code that you need and any annotation or thoughts on the results. It's like a Stata .do file, but prettier and a bit more powerful. 
+
+## Data
+
+In this first code "chunk", I am going to call in the data sample and look at the first 5 rows. 
+
+```{r data}
+# Call in the data
+load("2021-06-30_awed-spatial-sample.RData")
+
+# Look at the first 5 lines
+head(awed_slice, n = 5) %>% 
+  # Make a pretty table
+  kable() %>% 
+  kable_styling()
+```
+
+Here are some simple summaries:
+
+```{r simple-summary}
+# The number of test-negatives (dengue = 0) and test-positives (dengue = 1) in the dataset
+table(awed_slice$dengue) 
+```
+There are 1,973 test-negatives and 130 test-positives in this sample of the dataset.
+
+```{r simple-summary-2}
+# This is kind of an ugly summary, but it gives you the basic information
+summary(awed_slice)
+```
+
+In the summary, we see that in this sample of the AWED data, there are 11 variables. 
+
++ participant_id_shuffled - a character vector containing the shuffled participant ids
++ enrolment_date - the date of enrolment. First enrolled participant was on January 8, 2018. Last enrolled participant was enrolled on March 18, 2020.
++ illness_onset - the reported date of illness onset. First illness onset was January 4, 2018. Last illness onset was March 16, 2020.
++ cluster - the AWED study cluster containing the participant's home address (labelled 1-24)
++ intervention - whether the cluster was untreated (intervention = 0) or treated with wMel-carrying Ae. aegypti deployments (intervention = 1)
++ dengue - whether the participant tested negative for dengue (dengue = 0) or tested positive for dengue (dengue = 1)
++ longitude - of home location
++ latitude - of home location
++ serotype - either test-negative, the identified dengue serotype (DENV1-DENV4), or unknown dengue serotype (unable to identify)
++ age_shuffled
++ sex_shuffled
+
+## Maps
+
+Here, the code gets a bit complicated so I have hidden it from the output for now. Basically, I'm tidying up the data so that it will make a pretty map.
+
+```{r map-prep, echo = FALSE, message=FALSE}
+# install.packages("tmap") 
+# install.packages("spatstat")
+library(tmap)
+library(rgdal)
+
+# Setting up a color palette for the different DENV serotypes
+df_col_sero <- data.frame(serotype = c(paste0("DENV", 1:4), "Unknown", "Test-negative"),
+                          sero.color = c("#0AA4D1", "#F3C73E", "#EF7822", "#76C1A8", "#003D58", "gray"),
+                          sero.shape = c(21:24, 4, 25))
+
+# Tidying up data for mapping
+work_ts_spat <- awed_slice %>% 
+  mutate(serotype = case_when(serotype == "denv1" ~ "DENV1",
+                              serotype == "denv2" ~ "DENV2",
+                              serotype == "denv3" ~ "DENV3",
+                              serotype == "denv4" ~ "DENV4",
+                              serotype == "unk_serotype"~ "Unknown",
+                              serotype == "test-negative control" ~ "Test-negative"),
+         intervention = ifelse(intervention == 0, "Untreated", "Intervention")) %>% 
+  full_join(df_col_sero) 
+
+# Getting the "shape file" for the study area
+Yogya_Adm_1 <- readOGR("yogya-shape-files/", "Yk_CaseControl_20160512")
+int_assignment <- work_ts_spat %>% 
+  dplyr::select(cluster, Intervention = intervention) %>% 
+  distinct() %>% 
+  mutate(New_Clustr = ifelse(cluster < 10, paste0("0", cluster), as.character(cluster))) %>% 
+  dplyr::select(-cluster)
+Yogya_Adm_1@data <- left_join(Yogya_Adm_1@data, int_assignment, by = "New_Clustr")
+
+# Creating Spatial Points Dataframe 
+# This is so that the points from our dataset can be mapped onto the study area map
+CRTND_dengue_data_SPDF <- SpatialPointsDataFrame(coords = work_ts_spat[,c("longitude", "latitude")],
+                                                 data = work_ts_spat[, c("cluster", "intervention", "enrolment_date", "illness_onset", "dengue", "age_shuffled", "sex_shuffled", "serotype", "sero.color", "sero.shape")],
+                                                 proj4string = CRS("+init=epsg:4326")) # sets the projection to WGS 1984 using lat/long. Optional but good to specify
+
+# Setting up a dataset with just the dengue cases
+CRTND_VCD_data_SPDF <- subset(CRTND_dengue_data_SPDF, dengue == 1)
+```
+
+```{r map-prelim}
+# A look at the preliminary map of the study area
+map_yogya <- 
+  tm_shape(Yogya_Adm_1) +
+  tm_borders()
+
+map_yogya + 
+  tm_text(text = "New_Clustr")
+```
+
+```{r maps, fig.width=6, fig.height=7, fig.align='center'}
+# Dengue point plot
+map_yogya +
+  tm_polygons(col = "Intervention",
+              alpha = 0.5,
+              palette = c("lightgray", "white")) +
+  tm_shape(subset(CRTND_dengue_data_SPDF, dengue == 1)) + 
+  tm_symbols(col = "serotype",
+          shape = "serotype",
+          legend.col.show = FALSE,
+          legend.shape.show = FALSE,
+          palette = df_col_sero$sero.color,
+          shapes = df_col_sero$sero.shape,
+          size = 0.15) + 
+  tm_add_legend("symbol", 
+                col = df_col_sero$sero.color[1:5], 
+                shape = df_col_sero$sero.shape[1:5],
+                labels = df_col_sero$serotype[1:5]) +
+  tm_layout(legend.text.size = 0.9,
+            legend.title.size = 1,
+            legend.title.color = "white",
+            inner.margins = 0.1,
+            title = "Dengue Cases",
+            title.fontface = "bold") +
+  tm_scale_bar(breaks = c(0,.50,1.00), text.size = 0.9, position = c("left", "top"))
+
+# Test-negative point plot
+map_yogya +
+  tm_polygons(col = "Intervention",
+              alpha = 0.5,
+              palette = c("lightgray", "white")) +
+  tm_shape(subset(CRTND_dengue_data_SPDF, dengue == 0)) + 
+  tm_symbols(shape = 3,
+             col = "steelblue3",
+          size = 0.15) + 
+  tm_layout(legend.text.size = 0.9,
+            legend.title.size = 1,
+            legend.title.color = "white",
+            inner.margins = 0.1,
+            title = "Test-negatives",
+            title.fontface = "bold") +
+  tm_scale_bar(breaks = c(0,.50,1.00), text.size = 0.9, position = c("left", "top"))
+```

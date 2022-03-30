@@ -1,0 +1,13 @@
+#Packages needed to run the analyses required for map stuff 
+install.packages("spatstat")
+install.packages("rgdal")
+install.packages("sf")
+install.packages("tmap")
+install.packages("kableExtra")
+install.packages("raster")
+install.packages("permute")
+install.packages("ggpubr")
+install.packages("geodist")
+install.packages("purrr")
+install.packages("furrr")
+install.packages("dplyr")
